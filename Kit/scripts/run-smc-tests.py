@@ -48,13 +48,16 @@ def helper_source():
     state = state.replace("NSXPCConnection", "FakeHelperClientConnection")
     client = (ROOT / "Kit/helpers.swift").read_text()
     methods = "\n".join(swift_block(client, declaration) for declaration in (
+        "public func checkForUpdate()",
         "private func reinstall()",
+        "private func reregister()",
         "private func helper(_ completion:",
         "private func restoreFanModes(completion:",
         "public func uninstall(silent:",
     ))
     methods = methods.replace("private func", "func")
     methods = methods.replace('SMC.shared.getValue("FNum")', "FakeHelperEnvironment.current.fanCount")
+    methods = methods.replace("CFBundleCopyInfoDictionaryForURL(helperURL as CFURL)", "FakeHelperEnvironment.current.bundledHelperInfo")
     methods = methods.replace("if #available(macOS 13, *)", "if self.useModernService")
     methods = methods.replace("SMAppService.", "FakeHelperService.")
     methods = methods.replace("NotificationCenter.default", "FakeHelperNotifications.default")

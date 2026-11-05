@@ -1182,7 +1182,18 @@ public class SMCHelper {
             print("SMC helper update check skipped: cannot read bundled helper version at \(helperURL.path)")
             return
         }
-        guard let helper = self.helper(nil) else {
+        var reregistering = false
+        guard let helper = self.helper({ connected in
+            guard !connected else { return }
+            DispatchQueue.main.async {
+                // Every failed message reports here; recover only once.
+                guard !reregistering else { return }
+                reregistering = true
+                if #available(macOS 13, *) {
+                    self.reregister()
+                }
+            }
+        }) else {
             print("SMC helper update check skipped: helper proxy unavailable")
             return
         }
@@ -1206,6 +1217,32 @@ public class SMCHelper {
         self.uninstall(silent: true) { success in
             guard success else { return }
             self.install(completion: completion)
+        }
+    }
+    
+    // An app update replaces the bundle the daemon runs from, which can leave it enabled
+    // but no longer loaded by launchd (#3716). Such a helper can't restore the fan modes,
+    // so uninstall() would never remove it; register it again without restoring them.
+    @available(macOS 13, *)
+    private func reregister() {
+        print("SMC helper is enabled but not reachable, registering it again...")
+        self.connection?.invalidate()
+        self.connection = nil
+        SMAppService.daemon(plistName: self.plistName).unregister { error in
+            DispatchQueue.main.async {
+                if let error {
+                    print("failed to unregister SMC helper daemon: \(error.localizedDescription)")
+                    return
+                }
+                self.install { state in
+                    guard case .enabled = state else {
+                        print("failed to register the SMC helper again")
+                        NotificationCenter.default.post(name: .fanHelperState, object: nil, userInfo: ["state": false])
+                        return
+                    }
+                    print("the SMC helper was registered again")
+                }
+            }
         }
     }
     

@@ -661,6 +661,10 @@ final class FakeHelperEnvironment {
     var unregisterReply: ((Error?) -> Void)?
     var proxyAvailable = true
     var immediateReplies = false
+    var helperReachable = true
+    var status = FakeHelperStatus.enabled
+    var bundledHelperInfo: CFDictionary? = ["CFBundleShortVersionString": "test"] as CFDictionary
+    var installState = SMCHelperInstallState.enabled
     let error = NSError(domain: "SMCHelperTests", code: 1)
 }
 
@@ -679,8 +683,13 @@ final class FakeHelperClientConnection {
 final class FakeHelperProxy: NSObject, HelperProtocol {
     let error: (Error) -> Void
     init(error: @escaping (Error) -> Void) { self.error = error }
-    func version(completion: @escaping (String) -> Void) { completion("test") }
-    func setSMCPath(_ path: String) {}
+    func version(completion: @escaping (String) -> Void) {
+        guard FakeHelperEnvironment.current.helperReachable else { return error(FakeHelperEnvironment.current.error) }
+        completion("test")
+    }
+    func setSMCPath(_ path: String) {
+        if !FakeHelperEnvironment.current.helperReachable { error(FakeHelperEnvironment.current.error) }
+    }
     func setFanMode(id: Int, mode: Int, completion: @escaping (String?) -> Void) {
         let env = FakeHelperEnvironment.current
         env.requests.append(.init(id: id, mode: mode, reply: completion, fail: error))
@@ -700,14 +709,20 @@ class HelperClientFixture {
     var connection: FakeHelperClientConnection? = FakeHelperClientConnection()
     var useModernService = true
     func helperConnection() -> FakeHelperClientConnection? { connection }
+    func cleanupLegacyInstall() {}
     func install(completion: @escaping (SMCHelperInstallState) -> Void) {
         FakeHelperEnvironment.current.events.append("install")
-        completion(.enabled)
+        completion(FakeHelperEnvironment.current.installState)
     }
+}
+
+enum FakeHelperStatus: Int {
+    case notRegistered, enabled, requiresApproval, notFound
 }
 
 struct FakeHelperService {
     static func daemon(plistName: String) -> FakeHelperService { FakeHelperService() }
+    var status: FakeHelperStatus { FakeHelperEnvironment.current.status }
     func unregister(completionHandler: @escaping (Error?) -> Void) {
         FakeHelperEnvironment.current.events.append("unregister")
         FakeHelperEnvironment.current.unregisterReply = completionHandler
@@ -1023,5 +1038,58 @@ extension SMCTests {
         drainHelperCallbacks()
         XCTAssertEqual(helperEnv.requests.count, 2)
         XCTAssertEqual(helperEnv.events, ["unregister"])
+    }
+    func testHelperUpdateCheckKeepsReachableHelper() {
+        let client = TestSMCHelper()
+        client.checkForUpdate()
+        drainHelperCallbacks()
+        XCTAssertTrue(helperEnv.requests.isEmpty)
+        XCTAssertTrue(helperEnv.events.isEmpty)
+        XCTAssertNotNil(client.connection)
+    }
+    func testHelperUpdateCheckReinstallsOutdatedHelper() {
+        helperEnv.bundledHelperInfo = ["CFBundleShortVersionString": "newer"] as CFDictionary
+        let client = TestSMCHelper()
+        client.checkForUpdate()
+        XCTAssertEqual(helperEnv.requests.map { $0.mode }, [0, 0])
+    }
+    func testHelperUpdateCheckIgnoresUnregisteredHelper() {
+        helperEnv.status = .notFound
+        helperEnv.helperReachable = false
+        let client = TestSMCHelper()
+        client.checkForUpdate()
+        drainHelperCallbacks()
+        XCTAssertTrue(helperEnv.events.isEmpty)
+    }
+    func testHelperUpdateCheckReregistersUnreachableHelper() {
+        helperEnv.helperReachable = false
+        let client = TestSMCHelper()
+        client.checkForUpdate()
+        drainHelperCallbacks()
+        // setSMCPath and version both fail, but the helper is registered again only once.
+        XCTAssertEqual(helperEnv.events, ["invalidate", "unregister"])
+        XCTAssertNil(client.connection)
+        helperEnv.unregisterReply?(nil)
+        drainHelperCallbacks()
+        XCTAssertEqual(helperEnv.events, ["invalidate", "unregister", "install"])
+    }
+    func testHelperReregisterStopsOnUnregisterFailure() {
+        helperEnv.helperReachable = false
+        let client = TestSMCHelper()
+        client.checkForUpdate()
+        drainHelperCallbacks()
+        helperEnv.unregisterReply?(helperEnv.error)
+        drainHelperCallbacks()
+        XCTAssertEqual(helperEnv.events, ["invalidate", "unregister"])
+    }
+    func testHelperFailedReregisterNotifies() {
+        helperEnv.helperReachable = false
+        helperEnv.installState = .failed
+        let client = TestSMCHelper()
+        client.checkForUpdate()
+        drainHelperCallbacks()
+        helperEnv.unregisterReply?(nil)
+        drainHelperCallbacks()
+        XCTAssertEqual(helperEnv.events, ["invalidate", "unregister", "install", "notify"])
     }
 }
